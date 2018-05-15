@@ -3,6 +3,8 @@ const app = express();
 const port = 4201;
 const config = require('./config');
 
+const crypto = require('crypto');
+
 const api = express.Router();
 
 const mongoose = require('mongoose');
@@ -25,12 +27,17 @@ const userSchema = new mongoose.Schema({
     type: String,
     enum: [ 'owner', 'admin', 'member' ]
   },
-  password: {
-    type: String,
-    required: true,
-    select: false
-  }
+  hash: String,
+  salt: String
 }, { collection: 'users' });
+userSchema.methods.setPassword = function (password) {
+  this.salt = crypto.randomBytes(16).toString('hex');
+  this.hash = crypto.pbkdf2Sync(password, this.salt, 1000, 64, 'sha512').toString('hex');
+}
+userSchema.methods.validPassword = function (password) {
+  const hash = crypto.pbkdf2Sync(password, this.salt, 1000, 64, 'sha512').toString('hex');
+  return this.hash === hash;
+}
 const User = mongoose.model('User', userSchema);
 
 const bodyParser = require('body-parser');
@@ -39,10 +46,16 @@ app.use(bodyParser.json());
 app.use('/api', api);
 
 api.post('/signup', (req, res) => {
-  let user = new User(req.body);
+  const user = new User();
   user.role = 'member';
+  user.name = req.body.name;
+  user.email = req.body.email;
+  user.setPassword(req.body.password);
   user.save((err, user) => {
-    if (err) { return console.log(err) }
+    if (err) {
+      console.log('ERREUR DANS POST/SIGNUP', err);
+      return res.status(500).json({ msg: 'Erreur du serveur' });
+    }
     res.status(201).json({
       msg: `Utilisateur ${user.name} enregistré avec succès !`,
       user
@@ -50,41 +63,90 @@ api.post('/signup', (req, res) => {
   });
 }); // Inscription
 api.post('/signin', (req, res) => {
-  const user = req.body;
-  const userFinded = users.find(u => u.name === user.name && u.password === user.password);
-  if (!userFinded) {
-    return res.status(401).json({ msg: 'Connexion refusée' });
-  }
-  delete userFinded.password;
-  res.status(200).json({
-    msg: `Bienvenue ${userFinded.name} !`,
-    user: userFinded
+  User.findOne({ email: req.body.email }, (err, user) => {
+    if (err) {
+      console.log('ERREUR DANS POST/SIGNIN', err);
+      return res.status(500).json({ msg: 'Erreur du serveur.' });
+    }
+    if (!user) { return res.status(401).json({ msg: 'Pas d’utilisateur avec cet email !' }); }
+    if (!user.validPassword(req.body.password)) {
+      return res.status(401).json({ msg: 'Mauvais mot de passe !' });
+    }
+    res.status(200).json({
+      msg: `Utilisateur ${user.name} connecté avec succès !`,
+      user
+    });
   });
 }); // Connexion
 api.get('/users', (req, res) => {
-  const usersWithoutPassword = users.map(user => {
-    delete user.password;
-    return user;
-  });
-  res.status(200).json({
-    msg: 'Liste des utilisateur récupérée avec succès',
-    users: usersWithoutPassword
+  User.find((err, users) => {
+    if (err) {
+      console.log(('ERREUR DANS GET/USERS', err));
+      return res.status(500).json({ msg: 'Erreur du serveur.' });
+    }
+    const usersWithoutPassword = users.map(user => {
+      delete user.salt;
+      delete user.hash;
+      return user;
+    });
+    res.status(200).json({
+      msg: 'Liste des utilisateur récupérée avec succès',
+      users: usersWithoutPassword
+    });
   });
 }); // Obtenir la liste des utilisateurs
 api.get('/users/:_id', (req, res) => {
   const userId = req.params._id;
-  const userFinded = users.find(u => u._id === Number(userId));
-  if (!userFinded) {
-    return res.status(500).json({ msg: `Pas d’utilisateur avec l’identifiant ${userId}` });
-  }
-  delete userFinded.password;
-  res.status(200).json({
-    msg: `Utilisateur ${userFinded._id} trouvé.`,
-    user: userFinded
+  User.findById(userId, (err, user) => {
+    if (err) {
+      console.log('ERREUR DANS GET/USERS/_ID', err);
+      return res.status(500).json({ msg: 'Erreur du serveur.' });
+    }
+    const userWithoutPassword = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      __v: user.__v
+    }
+    res.status(200).json({
+      msg: 'Utilisateur trouvé',
+      userWithoutPassword
+    });
   });
 }); // Obtenir les données d’un utilisateur
-api.put('/users/:_id', (req, res) => { }); // Modifier les données d’un utilisateur
-api.delete('/users/:_id', (req, res) => { }); // Supprimer un utilisateur
+api.put('/users/:_id', (req, res) => {
+  const userId = req.params._id;
+  User.findByIdAndUpdate(userId, { $set: req.body }, { new: true }, (err, user) => {
+    if (err) {
+      console.log('ERREUR DANS PUT/USERS/_ID', err);
+      return res.status(500).json({ msg: 'Erreur du serveur' });
+    }
+    const userWithoutPassword = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      __v: user.__v
+    }
+    res.status(200).json({
+      msg: 'Utilisateur modifié',
+      userWithoutPassword
+    });
+  });
+}); // Modifier les données d’un utilisateur
+api.delete('/users/:_id', (req, res) => {
+  const userId = req.params._id;
+  User.findByIdAndRemove(userId, (err, user) => {
+    if (err) {
+      console.log('ERREUR DANS DELETE/USERS/_ID', err);
+      return res.status(500).json({ msg: 'Erreur du serveru'});
+    }
+    res.status(200).json({
+      msg: `Utilisateur ${userId} supprimé`
+    });
+  });
+}); // Supprimer un utilisateur
 
 app.listen(port, () => {
   console.log(`Le serveur écoute le port ${port}...`)
